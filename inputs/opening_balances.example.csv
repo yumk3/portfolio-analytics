@@ -1,0 +1,5 @@
+# Copy to opening_balances.csv (gitignored). Units held BEFORE the recorded
+# transaction history begins, so an early sale does not go negative.
+# account_type must match accounts.account_type (e.g. INDIVIDUAL, DIGITALASSET).
+account_type,symbol,as_of_date,units,source,note
+INDIVIDUAL,XYZ,2020-01-02,10.0,inferred,quantity inferred from sale; held before recorded history

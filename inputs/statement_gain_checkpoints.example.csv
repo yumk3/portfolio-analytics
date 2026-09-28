@@ -1,0 +1,13 @@
+# Month-by-month DOLLAR check against broker statements (scripts/validate_returns.py).
+# Our dollar gain for a month must equal the statement's:
+#     end securities value - start securities value - buys + sells + dividends
+# Start/end values: copy them from your statements (or from inputs/statement_checkpoints.csv).
+# TO FILL IN from each month's statement (Account Activity section), in dollars, positive numbers:
+#   statement_buys       total of all purchases, INCLUDING dividend reinvestments
+#   statement_sells      total sale proceeds
+#   statement_dividends  total dividends and interest credited
+# Enter 0 when the statement shows none. Leave blank until checked; blank rows are reported
+# as preliminary (only when our records show no activity that month) or as needing activity.
+account,period_start,period_end,statement_value_start,statement_value_end,statement_buys,statement_sells,statement_dividends,source_note
+Example Brokerage Individual,2026-02-01,2026-02-28,1000.00,1025.50,50.00,0,1.25,monthly statement Feb 2026
+Example Brokerage Crypto,2026-02-01,2026-02-28,500.00,480.25,0,0,0,monthly statement Feb 2026

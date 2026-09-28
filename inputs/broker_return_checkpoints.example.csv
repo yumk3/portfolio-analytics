@@ -1,0 +1,14 @@
+# Broker-reported RETURN PERCENTAGES to compare against ours (scripts/validate_returns.py).
+# One row per figure. Lines starting with # are ignored.
+#   account                 account name as in the accounts table, or TOTAL
+#   period_start            FIRST day of the period (e.g. 2026-01-01 for YTD), YYYY-MM-DD
+#   period_end              LAST day of the period, YYYY-MM-DD (must be on or before our latest valued date)
+#   broker_reported_return  percent as shown, e.g. 12.34 for 12.34% (negative allowed); the
+#                           cumulative return for the period, NOT an annual rate
+#   broker_method           TWR | money-weighted | unknown
+#   includes_cash           Y if the broker figure includes cash/buying power, N if securities only
+#   source_note             where you read it and when
+# Examples (remove the leading "# " to use one):
+# Example Brokerage Individual,Example Brokerage,2026-01-01,2026-08-31,18.20,unknown,Y,broker app > portfolio chart > YTD (read 2026-09-01)
+# Example Brokerage Crypto,Example Brokerage,2026-07-01,2026-08-31,43.75,TWR,N,performance report from a statement
+account,broker,period_start,period_end,broker_reported_return,broker_method,includes_cash,source_note

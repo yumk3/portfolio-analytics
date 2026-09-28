@@ -1,0 +1,28 @@
+# Portfolio analytics platform - Python dependencies
+# Install:  pip install -r requirements.txt
+
+# Database (create_db.py, seed_funds.py, seed_opening_balances.py)
+duckdb==1.5.5
+
+# Reads .env - never writes it (all scripts)
+python-dotenv==1.2.3
+
+# Official SnapTrade SDK, Personal API key flow (snaptrade_check.py, ingest_snaptrade.py)
+snaptrade-python-sdk==13.0.24
+
+# Corporate split history (load_splits.py)
+yfinance==1.7.0
+
+# Bulk frame insert for the daily rebuild (rebuild_holdings.py)
+pandas==3.0.5
+
+# ETF archiver: browser-like downloads, SSGA .xlsx files, parquet copies (archiver/etf_archiver.py)
+curl_cffi==0.16.2
+openpyxl==3.1.5
+pyarrow==25.0.1
+
+# XIRR root-finder (returns_lib.py)
+scipy==1.18.1
+
+# Unit tests (tests/test_returns_lib.py)
+pytest==9.1.1

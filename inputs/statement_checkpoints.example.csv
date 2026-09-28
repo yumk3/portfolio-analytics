@@ -1,0 +1,5 @@
+date,account_id,account_name,statement_securities_value,includes_cash,notes
+1/31/2026,ACCT-0001,Example Brokerage Individual,1000.00,no,
+1/31/2026,ACCT-0002,Example Brokerage Crypto,500.00,no,
+2/28/2026,ACCT-0001,Example Brokerage Individual,1025.50,no,
+2/28/2026,ACCT-0002,Example Brokerage Crypto,480.25,no,

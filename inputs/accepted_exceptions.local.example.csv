@@ -1,0 +1,9 @@
+# Copy to accepted_exceptions.local.csv (gitignored) and list your own.
+# Known small residuals (e.g. a fractional share left over from a corporate
+# action or a missing fractional trade) that you reviewed and chose NOT to
+# correct. They are still reported every run, as KNOWN instead of NEW.
+#   scope = valuation  used by value_portfolio, validate_valuation, compute_returns, validate_returns
+#   scope = rebuild    used by rebuild_holdings
+symbol,scope,reason
+XYZ,valuation,residual from holdings rebuild; sells exceed buys plus reinvestments
+XYZ,rebuild,"sells exceed buys by ~0.01 units (1% of max held); reviewed and accepted 2026-01-15"

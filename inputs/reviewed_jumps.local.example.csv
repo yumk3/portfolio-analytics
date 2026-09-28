@@ -1,0 +1,4 @@
+# Copy to reviewed_jumps.local.csv (gitignored). Single-day price moves over
+# the jump threshold that you checked by hand and confirmed as real.
+symbol,date,note
+XYZ,2025-04-09,"real market move, reviewed and accepted"

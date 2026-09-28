@@ -1,0 +1,75 @@
+# =====================================================================
+# Everything personal is gitignored. Each private file has a committed
+# template beside it (*.example.*). See "Private files" in README.md.
+# =====================================================================
+
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+
+# Private notes, audits and Claude Code local files
+_private/
+CLAUDE.md
+.claude/settings.local.json
+
+# Local data, database, downloads and backups
+# (includes data/raw/snaptrade/ - raw API responses with full account numbers -
+#  and data/raw/etf_holdings/ with its _rejected/, _incoming/, _manifest/)
+data/
+data/raw/
+*.duckdb
+*.duckdb.wal
+*.parquet
+
+# Personal inputs: commit only the *.example.csv templates
+inputs/*.csv
+!inputs/*.example.csv
+
+# Any *.local.* file is private; its *.local.example.* template is not
+*.local.*
+!*.local.example.*
+
+# Generated reports and run output
+reports/
+logs/
+*.log
+*.lock
+ETF_ARCHIVER_STATUS.txt
+
+# Personal configuration: commit only the .example versions
+archiver/config.ini
+# (the archiver no longer reads funds.csv; the fund list is in config.ini)
+archiver/funds.csv
+
+# Virtual environments
+venv/
+.venv/
+
+# Python bytecode and test caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# SnapTrade credential files (keep on disk, never commit)
+snaptrade-*.txt
+*recovery-codes*
+*consumer-key*
+*client-ID*
+
+# Windows shortcuts and exported scheduled tasks
+*.lnk
+*.xml
+
+# Spreadsheets and raw captures that might be dropped in by hand
+*.xlsx
+*.xls
+
+# Other databases, editor settings and Windows folder files
+*.db
+.vscode/
+Thumbs.db
+desktop.ini
+
+# Fabricated sample data (scripts/make_sample_data.py) is meant to be published
+!sample_data/sample.duckdb
