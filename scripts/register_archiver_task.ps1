@@ -36,6 +36,10 @@ $triggers = @(
     (New-ScheduledTaskTrigger -Daily -At $MorningRun),
     (New-ScheduledTaskTrigger -Daily -At $RetryRun)
 )
+# New-ScheduledTaskTrigger stores a UTC instant, which shifts by an hour at each
+# daylight-saving change. A start time without an offset is local clock time.
+$triggers[0].StartBoundary = (Get-Date $MorningRun).ToString("yyyy-MM-dd'T'HH:mm:ss")
+$triggers[1].StartBoundary = (Get-Date $RetryRun).ToString("yyyy-MM-dd'T'HH:mm:ss")
 
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
