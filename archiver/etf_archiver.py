@@ -144,7 +144,15 @@ def configure(sandbox=None):
     INBOX = RAW_ROOT / "_manual_inbox"
 
 
-configure()
+# Importing must not require config.ini (tests, --check-file). A real run calls
+# configure() again below and stops with the "copy config.example.ini" message.
+RAW_ROOT = PARSED_ROOT = LOG_DIR = DB_PATH = BACKUP_ROOT = STATUS_FILE = None
+LOG_FILE = LOCK_FILE = INBOX = None
+SANDBOX = False
+try:
+    configure()
+except SystemExit:
+    pass
 
 
 def log(message):
@@ -942,8 +950,7 @@ if __name__ == "__main__":
         if _MISSING:
             sys.exit(f"Missing Python libraries: {', '.join(_MISSING)}")
         sys.exit(check_file(args.check_file, args.issuer))
-    if args.sandbox:
-        configure(args.sandbox)
+    configure(args.sandbox)     # without --sandbox, stops here if config.ini is missing
     try:
         code = main(pathlib.Path(args.funds_file) if args.funds_file else None)
     except Exception:
