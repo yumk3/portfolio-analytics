@@ -61,15 +61,55 @@ def load(con):
     return accounts, pvd, txns, opening, holdings
 
 
-def excluded_symbols(pvd, txns):
-    """Return symbols ever held without a price, or traded but never valued.
+def returns_cutoff(pvd, txns):
+    """Return (as_of, excluded {symbol: reason}, holding_back [symbols]).
 
-    These are excluded from portfolio TWR and XIRR, value and flows alike, so
-    a missing price cannot masquerade as a gain or loss.
+    1. Symbols never priced while held (or traded but never valued) are
+       excluded and ignored when choosing the as-of date.
+    2. The as-of date is the last valued date on which every other held
+       symbol has a usable price (actual, or within the 5-day carry-forward).
+    3. A symbol with a missing price on or before the as-of date is excluded,
+       so a gap cannot fake a gain or loss; repeat until the date is stable.
+    4. Symbols still missing a price after the as-of date hold it back.
+    Excluded symbols are left out of portfolio TWR and XIRR, value and flows.
     """
-    unpriced = set(pvd.loc[pvd["price"].isna() | pvd["market_value"].isna(), "symbol"])
-    never_valued = set(txns["symbol"].dropna()) - set(pvd["symbol"])
-    return sorted(unpriced | never_valued)
+    priced = pvd["price"].notna() & pvd["market_value"].notna()
+    valued = set(pvd["symbol"])
+    excluded = {s: "never priced while held" for s in sorted(valued - set(pvd.loc[priced, "symbol"]))}
+    for s in sorted(set(txns["symbol"].dropna()) - valued):
+        excluded[s] = "traded but never valued (no holding at any close)"
+    gaps = pvd.loc[~priced, ["date", "symbol"]]
+    dates = sorted(set(pvd["date"]))
+    while True:                          # each pass excludes at least one more symbol
+        open_gaps = gaps[~gaps["symbol"].isin(list(excluded))]
+        bad = set(open_gaps["date"])
+        good = [d for d in dates if d not in bad]
+        if not good:
+            return None, excluded, sorted(set(open_gaps["symbol"]))
+        as_of = good[-1]
+        before = open_gaps[open_gaps["date"] <= as_of]
+        if before.empty:
+            break
+        for sym, g in before.groupby("symbol"):
+            excluded[sym] = ("no usable price on %d held day(s) on or before the as-of "
+                             "date, first %s" % (len(g), min(g["date"])))
+    after = open_gaps[open_gaps["date"] > as_of]
+    return as_of, excluded, sorted(set(after["symbol"]))
+
+
+def exclusion_rows(pvd, excluded, names, as_of):
+    """Return one row per excluded symbol: reason and value on its last priced day."""
+    rows = []
+    for sym, reason in sorted(excluded.items()):
+        p = pvd[(pvd["symbol"] == sym) & pvd["price"].notna() & pvd["market_value"].notna()
+                & (pvd["date"] <= as_of)]
+        last = max(p["date"]) if len(p) else None
+        accounts = sorted({names.get(a, a) for a in pvd.loc[pvd["symbol"] == sym, "account_id"]})
+        rows.append({"symbol": sym, "accounts": ", ".join(accounts), "reason": reason,
+                     "last_priced_date": last,
+                     "last_priced_value": (float(p.loc[p["date"] == last, "market_value"].sum())
+                                           if last is not None else None)})
+    return rows
 
 
 def daily_flows(txns, opening, pvd, excluded, warnings):
@@ -340,10 +380,20 @@ def main():
         return 2
 
     warnings = []
-    asof = max(pvd["date"])
     names = dict(zip(accounts["account_id"], accounts["account_name"]))
     crypto_accounts = set(accounts.loc[accounts["account_type"] == "DIGITALASSET", "account_id"])
-    excluded = excluded_symbols(pvd, txns)
+    asof, excluded_reasons, holding_back = returns_cutoff(pvd, txns)
+    if asof is None:
+        print("ERROR: no valued date has a usable price for every held symbol "
+              f"(missing: {', '.join(holding_back)}). Run load_prices.py and value_portfolio.py.")
+        return 2
+    excluded = sorted(excluded_reasons)
+    not_current = ""
+    if holding_back:
+        since = min(d for d in pvd["date"] if d > asof)
+        not_current = (f"valuation not current since {since}; no usable price for: "
+                       f"{', '.join(holding_back)}")
+        warnings.append(not_current)
     included = pvd[~pvd["symbol"].isin(excluded)]
 
     # A held, included position with no valuation row would silently drop value.
@@ -390,13 +440,31 @@ def main():
                          [(d, s) for _, s, d, _ in realized]
                          + [(r.as_of_date, r.symbol) for r in ex_hold.itertuples()], asof)
 
+    if not_current:
+        for r in summary:
+            r["notes"] = "; ".join(filter(None, [r["notes"], not_current]))
+    # All-in adds excluded symbols' realized P&L only: their price history has
+    # gaps, so an unrealized gain cannot be measured consistently across periods.
+    held = holdings[(holdings["as_of_date"] == asof) & holdings["symbol"].isin(excluded)]
+    for r in summary:
+        syms = sorted(set(held["symbol"] if r["account"] == TOTAL
+                          else held.loc[held["account_id"] == r["account_id"], "symbol"]))
+        if syms:
+            r["notes"] = "; ".join(filter(None, [r["notes"], "excluded but still held "
+                                   f"(unrealized gain not in all-in): {', '.join(syms)}"]))
+
     positions = position_rows(txns, opening, pvd, holdings, excluded, names, asof)
+    exclusions = exclusion_rows(pvd, excluded_reasons, names, asof)
 
     df_daily = pd.DataFrame(daily)
     df_summary = pd.DataFrame(summary)
     df_pos = pd.DataFrame(positions)
+    df_excl = pd.DataFrame(exclusions, columns=["symbol", "accounts", "reason",
+                                                "last_priced_date", "last_priced_value"])
+    df_excl = df_excl.astype({"last_priced_value": "float64"})
+    df_excl["last_priced_date"] = pd.to_datetime(df_excl["last_priced_date"]).dt.date
     stamp = datetime.datetime.now()
-    for df in (df_daily, df_summary, df_pos):
+    for df in (df_daily, df_summary, df_pos, df_excl):
         df["computed_at"] = stamp
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -414,13 +482,22 @@ def main():
             con.register("df_in", df)
             con.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM df_in")
             con.unregister("df_in")
+        # Explicit schema: the frame is often empty, and inferred types would be wrong.
+        con.execute("""CREATE OR REPLACE TABLE returns_exclusions (
+                           symbol VARCHAR, accounts VARCHAR, reason VARCHAR,
+                           last_priced_date DATE, last_priced_value DOUBLE,
+                           computed_at TIMESTAMP)""")
+        if len(df_excl):
+            con.register("df_in", df_excl)
+            con.execute("INSERT INTO returns_exclusions SELECT * FROM df_in")
+            con.unregister("df_in")
         con.execute("COMMIT")
         finished = datetime.datetime.now()
         con.execute(JOB_RUNS_DDL)
         detail = lambda n, df: f"{len(df)} rows, as of {asof}"
         rows = [(JOB_NAME, run_id, started, finished, n, "ok", detail(n, df), "")
                 for n, df in (("returns_daily", df_daily), ("returns_summary", df_summary),
-                              ("position_returns", df_pos))]
+                              ("position_returns", df_pos), ("returns_exclusions", df_excl))]
         rows.append((JOB_NAME, run_id, started, finished, "_run",
                      "ok" if not warnings else "warnings",
                      f"as of {asof}; excluded {', '.join(excluded)}; backup {backup.name}",
@@ -438,7 +515,11 @@ def main():
 
     pct = lambda x: "      -" if x is None or pd.isna(x) else f"{x * 100:7.2f}%"
     print(f"Returns as of {asof} (securities sleeve only; backup: {backup.name})")
-    print(f"Left out of portfolio returns (unpriced): {', '.join(excluded) or 'none'}")
+    print("Left out of portfolio returns: %s" % ("none" if not exclusions else ""))
+    for e in exclusions:
+        last = ("last priced %s, value %.2f" % (e["last_priced_date"], e["last_priced_value"])
+                if e["last_priced_date"] is not None else "never priced")
+        print(f"  {e['symbol']:8} {e['reason']}; {last}")
     print(f"\n{'account':22} {'period':6} {'TWR':>8} {'TWR ann':>8} {'MWR':>8} "
           f"{'XIRR ann':>8} {'$ gain':>9} {'excl $':>8}")
     for r in summary:
@@ -447,7 +528,8 @@ def main():
               f"{r['excluded_realized_pnl']:8.2f}")
     und = df_daily[df_daily["status"] == "undefined"]
     print(f"\nreturns_daily {len(df_daily)} rows ({len(und)} undefined days), "
-          f"returns_summary {len(df_summary)}, position_returns {len(df_pos)}")
+          f"returns_summary {len(df_summary)}, position_returns {len(df_pos)}, "
+          f"returns_exclusions {len(df_excl)}")
     for w in warnings:
         print(f"WARNING: {w}")
     return 0

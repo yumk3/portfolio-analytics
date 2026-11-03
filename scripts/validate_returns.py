@@ -68,9 +68,70 @@ def load(con):
     return daily, summary, pos, pvd, txns, opening, splits
 
 
-def excluded_symbols(pvd, txns):
-    return set(pvd.loc[pvd["p"].isna() | pvd["mv"].isna(), "symbol"]) | \
-        (set(txns["symbol"].dropna()) - set(pvd["symbol"]))
+def cutoff_sql(con):
+    """Return (as_of, excluded set, holding_back list), derived here in SQL.
+
+    Same rules as compute_returns, implemented independently: never-priced
+    symbols are excluded first; the as-of date is the last valued date with
+    no missing price among the rest; symbols missing a price on or before it
+    are excluded and the date recomputed; symbols missing after it hold it back.
+    """
+    q = lambda sql, p=None: con.execute(sql, p or []).fetchall()
+    excluded = {r[0] for r in q("""
+        SELECT symbol FROM positions_value_daily GROUP BY symbol
+        HAVING count(*) FILTER (WHERE price IS NOT NULL AND market_value IS NOT NULL) = 0
+        UNION
+        SELECT DISTINCT symbol FROM transactions
+        WHERE symbol IS NOT NULL
+          AND symbol NOT IN (SELECT symbol FROM positions_value_daily)""")}
+    missing = """FROM positions_value_daily
+                 WHERE (price IS NULL OR market_value IS NULL)
+                   AND NOT list_contains(?::VARCHAR[], symbol)"""
+    while True:
+        as_of = q(f"""SELECT max(date) FROM (SELECT DISTINCT date FROM positions_value_daily)
+                      WHERE date NOT IN (SELECT date {missing})""", [sorted(excluded)])[0][0]
+        if as_of is None:
+            return None, excluded, sorted({r[0] for r in q(f"SELECT DISTINCT symbol {missing}",
+                                                            [sorted(excluded)])})
+        more = {r[0] for r in q(f"SELECT DISTINCT symbol {missing} AND date <= ?",
+                                [sorted(excluded), as_of])}
+        if not more:
+            break
+        excluded |= more
+    back = sorted({r[0] for r in q(f"SELECT DISTINCT symbol {missing} AND date > ?",
+                                   [sorted(excluded), as_of])})
+    return as_of, excluded, back
+
+
+def check_0(con, daily, summary, as_of, excluded, back):
+    """Check 0: the stored as-of date and exclusions match an independent derivation."""
+    lines, bad = [], 0
+    stored_end = daily.loc[daily["account"] == "TOTAL", "date"].max()
+    lines.append(f"as-of date: derived {as_of}, stored returns end {stored_end}")
+    bad += as_of != stored_end
+    tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+    stored_ex = ({r[0] for r in con.execute("SELECT symbol FROM returns_exclusions").fetchall()}
+                 if "returns_exclusions" in tables else None)
+    if stored_ex is None:
+        lines.append("returns_exclusions table missing - rerun compute_returns.py")
+        bad += 1
+    else:
+        lines.append(f"excluded: derived {sorted(excluded) or 'none'}, "
+                     f"stored {sorted(stored_ex) or 'none'}")
+        bad += stored_ex != excluded
+    notes = " ".join(summary["notes"].fillna(""))
+    if back:
+        named = all(s in notes for s in back) and "not current" in notes
+        lines.append(f"holding the as-of back: {', '.join(back)} "
+                     f"({'named' if named else 'NOT named'} in returns_summary notes)")
+        bad += not named
+    elif "not current" in notes:
+        lines.append("notes say 'not current' but every held symbol is priced")
+        bad += 1
+    report("0", "As-of date and exclusions derived independently",
+           "PASS" if not bad else "FAIL",
+           "Recomputes, in SQL, which symbols are excluded and where returns must "
+           "end; the stored tables must agree.", lines)
 
 
 def check_1a(daily, summary):
@@ -108,14 +169,26 @@ def check_1a(daily, summary):
            [f"largest difference: {worst[2]:.2e} ({worst[0]} {worst[1]})" if worst else "no windows"])
 
 
-def check_1b(summary, pos):
-    """Check 1b: per-position dollar gains must sum to the portfolio's (headline and all-in)."""
+def check_1b(summary, pos, pvd, txns, excluded, ids, as_of):
+    """Check 1b: per-position dollar gains must sum to the portfolio's (headline and all-in).
+
+    All-in adds excluded symbols' realized P&L (derived here independently);
+    unrealized gains of excluded positions still held are listed, not added.
+    """
     si = summary[summary["period"] == "SI"].set_index("account")
     lines, bad = [], 0
     for acct in si.index:
         p = pos[pos["account"] == ("COMBINED" if acct == "TOTAL" else acct)]
-        priced = p[~p["flags"].str.contains("unpriced", na=False)]["dollar_gain"].sum()
-        allin = p["dollar_gain"].sum()
+        unpriced = p["flags"].str.contains("unpriced", na=False)
+        priced = p[~unpriced]["dollar_gain"].sum()
+        acct_ids = list(ids.values()) if acct == "TOTAL" else [ids[acct]]
+        _, _, _, realized = residual_and_excluded(acct_ids, datetime.date.min, as_of,
+                                                  pvd, txns, excluded)
+        allin = priced + realized
+        still_held = sorted(p.loc[unpriced & (p["status"] == "open"), "symbol"])
+        if still_held:
+            lines.append(f"{acct:22} excluded but still held (unrealized not in all-in): "
+                         f"{', '.join(still_held)}")
         d1 = priced - si.at[acct, "dollar_gain"]
         d2 = allin - si.at[acct, "all_in_dollar_gain"]
         bad += abs(d1) > DOLLAR_TOL or abs(d2) > DOLLAR_TOL
@@ -131,11 +204,7 @@ def check_1b(summary, pos):
 # Check 1c recomputes daily returns in SQL from the source tables - a separate
 # code path from compute_returns, so a bug cannot hide in both.
 RECOMPUTE_SQL = """
-WITH excl AS (
-    SELECT DISTINCT symbol FROM positions_value_daily WHERE price IS NULL OR market_value IS NULL
-    UNION
-    SELECT DISTINCT symbol FROM transactions
-    WHERE symbol IS NOT NULL AND symbol NOT IN (SELECT symbol FROM positions_value_daily)),
+WITH excl AS (SELECT unnest(?::VARCHAR[]) AS symbol),
 v AS (
     SELECT account_id, date, sum(market_value)::DOUBLE AS v FROM positions_value_daily
     WHERE symbol NOT IN (SELECT symbol FROM excl) GROUP BY ALL),
@@ -151,7 +220,7 @@ f0 AS (
       ON p.account_id = ob.account_id AND p.symbol = ob.symbol AND p.date = ob.as_of_date
     WHERE ob.symbol NOT IN (SELECT symbol FROM excl)),
 f AS (SELECT account_id, date, sum(i) i, sum(o) o, sum(inc) inc FROM f0 GROUP BY ALL),
-lastd AS (SELECT max(date) AS a FROM positions_value_daily),
+lastd AS (SELECT ?::DATE AS a),
 bounds AS (
     SELECT account_id, min(d) AS d0 FROM (
         SELECT account_id, date AS d FROM v WHERE v <> 0
@@ -177,8 +246,8 @@ FROM lagged ORDER BY account_id, date
 """
 
 
-def check_1c(con, daily):
-    sql = con.execute(RECOMPUTE_SQL).df()
+def check_1c(con, daily, excluded, as_of):
+    sql = con.execute(RECOMPUTE_SQL, [sorted(excluded), as_of]).df()
     sql["date"] = pd.to_datetime(sql["date"]).dt.date
     ours = daily.assign(key=daily["account_id"].fillna("TOTAL"))[
         ["key", "date", "daily_return", "twr_index"]]
@@ -464,13 +533,14 @@ def main():
     con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         daily, summary, pos, pvd, txns, opening, splits = load(con)
-        excluded = excluded_symbols(pvd, txns)
+        as_of, excluded, back = cutoff_sql(con)
         ids = dict(con.execute("SELECT account_name, account_id FROM accounts").fetchall())
         print(f"Validating returns as of {daily['date'].max()} "
-              f"(excluded unpriced symbols: {', '.join(sorted(excluded))})")
+              f"(excluded symbols: {', '.join(sorted(excluded)) or 'none'})")
+        check_0(con, daily, summary, as_of, excluded, back)
         check_1a(daily, summary)
-        check_1b(summary, pos)
-        check_1c(con, daily)
+        check_1b(summary, pos, pvd, txns, excluded, ids, as_of)
+        check_1c(con, daily, excluded, as_of)
         check_2(daily, pvd, txns, opening, splits, excluded)
         check_3a(daily, pvd, txns, excluded, ids)
         check_3b(daily, pvd, txns, excluded, ids)
