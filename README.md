@@ -94,7 +94,7 @@ cd portfolio-analytics
 python -m venv ..\portfolio-venv
 ..\portfolio-venv\Scripts\python.exe -m pip install -r requirements.txt
 ..\portfolio-venv\Scripts\python.exe scripts\make_sample_data.py
-..\portfolio-venv\Scripts\python.exe scripts\rebuild_holdings.py --db sample_data\sample.duckdb
+..\portfolio-venv\Scripts\python.exe scripts\rebuild_holdings.py --db sample_data\sample.duckdb --through 2026-09-25
 ..\portfolio-venv\Scripts\python.exe scripts\value_portfolio.py --db sample_data\sample.duckdb
 ..\portfolio-venv\Scripts\python.exe -m pytest tests
 ```
@@ -103,7 +103,9 @@ Keep the virtual environment outside any cloud-synced folder (e.g. OneDrive): a 
 inside one throws `PermissionError` during installs and can silently lose packages.
 
 `make_sample_data.py` rebuilds `sample_data/sample.duckdb` from scratch each time (it
-refuses to write under `data/`). `rebuild_holdings.py` and `value_portfolio.py` accept
+refuses to write under `data/`). The sample's last price is 2026-09-25, so the rebuild
+is pinned there with `--through` (default: today; future dates are rejected) and the
+results are the same whenever they are run. `rebuild_holdings.py` and `value_portfolio.py` accept
 `--db PATH` or the `PORTFOLIO_DB` environment variable; without either they use
 `DB_PATH` from `.env`, then `data/portfolio.duckdb`. Relative paths resolve against the
 project root. `PORTFOLIO_DB` is honoured only by those two scripts, so do not leave it
@@ -303,7 +305,10 @@ and its validator; the scheduled ETF archiver; offline sample data and tests.
 
 **In progress:** returns module (`compute_returns.py`, `validate_returns.py`):
 time-weighted return, portfolio and per-position XIRR, and broker/statement
-comparisons. Per position, trust the simple return when a position is flagged
+comparisons. Returns end at the last date on which every held symbol is priced, with a
+"valuation not current" warning naming any symbol holding that date back; symbols left
+out of portfolio returns are listed with their reason in `returns_exclusions`. Per
+position, trust the simple return when a position is flagged
 `multiple_rates_nearest_10pct` or `held_under_1y`; the money-weighted figure is for
 reference only.
 
@@ -316,5 +321,6 @@ reference only.
 - iShares endpoints are blocked by bot detection, so those funds are manual.
 - Vanguard does not publish a public daily holdings file.
 - Delisted tickers with no Yahoo price history cannot be valued.
+- The "all-in" dollar gain includes excluded symbols' realized P&L only; an excluded symbol that is still held contributes no unrealized gain (flagged in the notes).
 
 ---

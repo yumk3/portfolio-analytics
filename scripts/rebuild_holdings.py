@@ -51,6 +51,9 @@ def split_factor(splits_by_symbol, symbol, event_date):
     return factor
 
 
+THROUGH = None        # last date to rebuild through (--through); None means today
+
+
 def main():
     if not db_file.exists():
         print("ERROR: %s not found. Run scripts/create_db.py first." % db_file)
@@ -59,6 +62,8 @@ def main():
     con = duckdb.connect(str(db_file))
     try:
         today = con.execute("SELECT current_date").fetchone()[0]
+        if THROUGH is not None:
+            today = THROUGH
 
         splits_by_symbol = {}
         for sym, d, ratio in con.execute(
@@ -266,7 +271,14 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Rebuild holdings_daily from transactions.")
     ap.add_argument("--db", help="DuckDB file to use instead of PORTFOLIO_DB / DB_PATH / "
                                  "data/portfolio.duckdb (relative to the project root)")
+    ap.add_argument("--through", metavar="YYYY-MM-DD", type=datetime.date.fromisoformat,
+                    help="last date to rebuild through (default: today); not in the future")
     args = ap.parse_args()
+    if args.through is not None:
+        if args.through > datetime.date.today():
+            print("ERROR: --through %s is in the future." % args.through)
+            sys.exit(2)
+        THROUGH = args.through
     if args.db:
         db_file = pathlib.Path(args.db)
         if not db_file.is_absolute():

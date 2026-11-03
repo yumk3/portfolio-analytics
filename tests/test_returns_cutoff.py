@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+STALE_THROUGH = "2026-10-15"      # past the sample's last price, for a fixed stale tail
 spec = importlib.util.spec_from_file_location("compute_returns_under_test",
                                               REPO / "scripts" / "compute_returns.py")
 cr = importlib.util.module_from_spec(spec)
@@ -108,7 +109,7 @@ def sample_db(tmp_path_factory):
     db = base / "sample.duckdb"
     env = isolated_env(base, db)
     for script, args in (("make_sample_data.py", ["--out", str(db)]),
-                         ("rebuild_holdings.py", ["--db", str(db)]),
+                         ("rebuild_holdings.py", ["--db", str(db), "--through", STALE_THROUGH]),
                          ("value_portfolio.py", ["--db", str(db)])):
         r = run(script, *args, env=env)
         assert r.returncode == 0, r.stdout + r.stderr
@@ -178,8 +179,9 @@ def test_excluded_symbols_are_reported_with_reason_and_last_value(sample_db, tmp
     con.execute("""DELETE FROM prices WHERE symbol = 'JNJ'
                    AND price_date BETWEEN DATE '2025-05-01' AND DATE '2025-05-21'""")
     con.close()
-    for script in ("rebuild_holdings.py", "value_portfolio.py"):
-        assert run(script, "--db", str(db), env=env).returncode == 0
+    assert run("rebuild_holdings.py", "--db", str(db), "--through", STALE_THROUGH,
+               env=env).returncode == 0
+    assert run("value_portfolio.py", "--db", str(db), env=env).returncode == 0
     r = run("compute_returns.py", env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "OLDCO    never priced while held; never priced" in r.stdout

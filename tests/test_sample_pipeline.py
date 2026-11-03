@@ -24,7 +24,7 @@ def test_sample_pipeline_builds_and_values(tmp_path):
     env = {k: v for k, v in os.environ.items() if k not in ("DB_PATH", "PORTFOLIO_DB")}
 
     run("make_sample_data.py", "--out", str(db), env=env)
-    rebuild_out = run("rebuild_holdings.py", "--db", str(db), env=env)
+    rebuild_out = run("rebuild_holdings.py", "--db", str(db), "--through", "2026-09-25", env=env)
     run("value_portfolio.py", "--db", str(db), env=env)
 
     assert "mismatch: 0" in rebuild_out
