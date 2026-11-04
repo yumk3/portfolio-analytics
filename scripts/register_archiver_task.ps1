@@ -1,11 +1,12 @@
 <#
-Creates or replaces the scheduled task that runs the ETF archiver twice daily; touches no other task.
+Creates or replaces the scheduled task that runs the ETF archiver three times daily; touches no other task.
 Run: powershell -ExecutionPolicy Bypass -File <repo>\scripts\register_archiver_task.ps1
 #>
 
 $TaskName    = "PortfolioAnalytics_ETFArchiver"
 $MorningRun  = "7:15AM"
 $RetryRun    = "1:00PM"     # second chance: already-captured funds are skipped
+$EveningRun  = "6:00PM"     # third chance, for files posted after the retry
 $MakeDesktopShortcut = $true
 
 $ErrorActionPreference = "Stop"
@@ -32,14 +33,13 @@ foreach ($p in @($Python, $Script, $Repo)) {
 $action = New-ScheduledTaskAction -Execute $Python `
     -Argument "`"$Script`"" -WorkingDirectory $Repo
 
-$triggers = @(
-    (New-ScheduledTaskTrigger -Daily -At $MorningRun),
-    (New-ScheduledTaskTrigger -Daily -At $RetryRun)
-)
 # New-ScheduledTaskTrigger stores a UTC instant, which shifts by an hour at each
 # daylight-saving change. A start time without an offset is local clock time.
-$triggers[0].StartBoundary = (Get-Date $MorningRun).ToString("yyyy-MM-dd'T'HH:mm:ss")
-$triggers[1].StartBoundary = (Get-Date $RetryRun).ToString("yyyy-MM-dd'T'HH:mm:ss")
+$triggers = foreach ($at in @($MorningRun, $RetryRun, $EveningRun)) {
+    $tr = New-ScheduledTaskTrigger -Daily -At $at
+    $tr.StartBoundary = (Get-Date $at).ToString("yyyy-MM-dd'T'HH:mm:ss")
+    $tr
+}
 
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `

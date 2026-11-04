@@ -187,10 +187,11 @@ with no recorded purchase gets an opening balance inferred from the sale quantit
 powershell -ExecutionPolicy Bypass -File scripts\register_archiver_task.ps1
 ```
 
-Registers one task, `PortfolioAnalytics_ETFArchiver`, running daily at two times set at
-the top of the script (defaults 7:15 AM and 1:00 PM; the second run only retries funds
-not yet captured that day). The script finds the repo from its own location and runs
-`task_python` from `archiver/config.ini`. Task settings: catch up after a missed start,
+Registers one task, `PortfolioAnalytics_ETFArchiver`, running daily at three times set at
+the top of the script (defaults 7:15 AM, 1:00 PM and 6:00 PM, local clock time; later
+runs only retry funds not yet captured that day). Issuers serve only their latest file,
+so a day with no successful capture cannot be recovered. The script finds the repo from
+its own location and runs `task_python` from `archiver/config.ini`. Task settings: catch up after a missed start,
 run and keep running on battery, wake to run, require network, 30-minute limit, no
 parallel instances, interactive logon (no stored password). It also creates a desktop
 shortcut to the status file unless `$MakeDesktopShortcut` is set to `$false`.
