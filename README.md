@@ -189,6 +189,11 @@ Run in this order on a fresh database; all steps are safe to re-run.
 | `validate_valuation.py` | 15 independent checks (0-11); exits non-zero on any FAIL. |
 | `compute_returns.py` / `validate_returns.py` | Returns tables and their validation (in progress, see Status). |
 | `daily_run.py` | Runs the steps above in order (rebuild before prices), each as its own process, after one verified database backup (ingest and compute_returns reuse it; run alone, they take their own as before); records every step in `job_runs`. Stops on a failed step, a partial ingest or a new rebuild residual; a valuation FAIL skips returns and leaves the previous returns tables in place. `--dry-run` lists the scripts it would run. |
+| `status_report.py` | Writes `PORTFOLIO_STATUS.txt` (gitignored): today's archiver runs and any missed scheduled time, each fund's results, the last nightly run's steps and every validator WARN/FAIL, returns as-of and warnings, and the size of `data/backups` (warns above `BACKUP_WARN_GB` in `.env`, default 2; nothing is deleted). Reads the database read-only; both scheduled jobs run it at the end, and its failure never changes their result. |
+
+**Status page.** Run records that could not be written because the database was
+locked are parked in `logs/job_runs_pending/` and `logs/daily_run_pending/` and written
+on the next successful run, never twice; the status page counts them until then.
 
 **Any new split requires a full price re-download.** yfinance restates historical
 closes and `rebuild_holdings.py` restates units whenever a split occurs; restating only
@@ -217,7 +222,8 @@ so a day with no successful capture cannot be recovered. The script finds the re
 its own location and runs `task_python` from `archiver/config.ini`. Task settings: catch up after a missed start,
 run and keep running on battery, wake to run, require network, 30-minute limit, no
 parallel instances, interactive logon (no stored password). It also creates a desktop
-shortcut to the status file unless `$MakeDesktopShortcut` is set to `$false`.
+shortcut, "Portfolio Status", to `PORTFOLIO_STATUS.txt` unless `$MakeDesktopShortcut` is
+set to `$false` (an older "ETF Archiver Status" shortcut made by this script is removed).
 
 | Action | Command |
 |---|---|
@@ -247,7 +253,7 @@ file), **manual** (not automated).
 | Saved holdings | `data/raw/etf_holdings/YYYY-MM-DD/<TICKER>_<issuer>.<ext>` (download date; the as-of date is inside the file) |
 | Rejected responses | `data/raw/etf_holdings/_rejected/YYYY-MM-DD/`, each with a `.reason.txt` |
 | Backup copy | `backup_root` in `archiver/config.ini` (one-way; never read, deleted or overwritten) |
-| Run summary | `ETF_ARCHIVER_STATUS.txt` |
+| Run summary | `ETF_ARCHIVER_STATUS.txt` (this run); `PORTFOLIO_STATUS.txt` (both jobs) |
 | Log | `logs/etf_archiver_YYYY-MM-DD.log` (kept 90 days) |
 | Run history | `job_runs`, `job_name = 'etf_archiver'` |
 

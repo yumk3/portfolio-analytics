@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -712,17 +713,25 @@ def write_job_runs(rows):
     """
     import duckdb
     pending_dir = LOG_DIR / "job_runs_pending"
-    backlog = sorted(pending_dir.glob("*.json")) if pending_dir.exists() else []
-    all_rows = list(rows)
-    for b in backlog:
-        all_rows += json.loads(b.read_text(encoding="utf-8"))
+    backlog, all_rows = [], list(rows)
+    for b in sorted(pending_dir.glob("*.json")) if pending_dir.exists() else []:
+        try:
+            parked = json.loads(b.read_text(encoding="utf-8"))
+            for r in parked:
+                for k in ("started_at", "finished_at"):
+                    if isinstance(r.get(k), str):
+                        r[k] = datetime.datetime.fromisoformat(r[k])
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue               # left in place; PORTFOLIO_STATUS.txt lists it
+        all_rows += parked
+        backlog.append(b)
     cols = ["job_name", "run_id", "started_at", "finished_at",
             "item", "status", "detail", "error"]
 
     def park(why):
         pending_dir.mkdir(parents=True, exist_ok=True)
         (pending_dir / f"{TODAY}_{RUN_TIME}.json").write_text(
-            json.dumps(rows, indent=1), encoding="utf-8")
+            json.dumps(rows, indent=1, default=str), encoding="utf-8")
         return f"job_runs not written ({why}); saved for the next run"
 
     if not SANDBOX and not DB_PATH.exists():
@@ -739,16 +748,61 @@ def write_job_runs(rows):
         try:
             con.execute(JOB_RUNS_DDL)
             con.execute("BEGIN")
-            con.executemany(f"INSERT INTO job_runs ({', '.join(cols)}) "
-                            f"VALUES ({', '.join('?' * len(cols))})",
-                            [[r[c] for c in cols] for r in all_rows])
+            # Skip rows already recorded, so a parked file that was written
+            # but not deleted adds nothing the next time.
+            run_ids = sorted({r["run_id"] for r in all_rows})
+            seen = set(con.execute(
+                f"SELECT job_name, run_id, item FROM job_runs WHERE run_id IN "
+                f"({', '.join('?' * len(run_ids))})", run_ids).fetchall())
+            new = []
+            for r in all_rows:
+                key = (r["job_name"], r["run_id"], r["item"])
+                if key not in seen:
+                    seen.add(key)
+                    new.append([r[c] for c in cols])
+            if new:
+                con.executemany(f"INSERT INTO job_runs ({', '.join(cols)}) "
+                                f"VALUES ({', '.join('?' * len(cols))})", new)
             con.execute("COMMIT")
+        except duckdb.Error as e:
+            try:
+                con.execute("ROLLBACK")
+            except duckdb.Error:
+                pass               # failed before the transaction began
+            return park(f"{type(e).__name__}: {str(e).splitlines()[0][:120]}")
         finally:
             con.close()
         for b in backlog:
-            b.unlink()
+            try:
+                b.unlink()
+            except OSError:
+                pass               # harmless: its rows are skipped next time
         return None
     return park("unknown")
+
+
+STATUS_SCRIPT = REPO / "scripts" / "status_report.py"
+STATUS_TIMEOUT = 120               # seconds
+
+
+def refresh_portfolio_status():
+    """Rewrite PORTFOLIO_STATUS.txt in its own process; return a warning or None.
+
+    Runs after every file is filed and recorded: nothing it does, including
+    crashing or hanging, can change the capture or this run's exit code.
+    """
+    try:
+        r = subprocess.run([sys.executable, str(STATUS_SCRIPT), "--db", str(DB_PATH),
+                            "--out", str(STATUS_FILE.parent / "PORTFOLIO_STATUS.txt"),
+                            "--log-dir", str(LOG_DIR), "--by", JOB_NAME],
+                           cwd=REPO, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=STATUS_TIMEOUT)
+    except Exception as e:
+        return f"PORTFOLIO_STATUS.txt not updated ({type(e).__name__}: {e})"
+    if r.returncode:
+        return (f"PORTFOLIO_STATUS.txt not updated (exit {r.returncode}): "
+                f"{(r.stdout + r.stderr).strip()[-300:]}")
+    return None
 
 
 def write_status(results, warnings, started, finished, preflight_problems=None):
@@ -839,6 +893,9 @@ def main(funds_file):
                              "started_at": started, "finished_at": datetime.datetime.now(),
                              "item": "_run", "status": "not_started",
                              "detail": "", "error": " | ".join(problems)}])
+            warn = refresh_portfolio_status()
+            if warn:
+                log(f"WARNING: {warn}")
         return 2
 
     lock = acquire_lock()
@@ -907,6 +964,10 @@ def main(funds_file):
                                + f"; backup copied {copied}",
                      "error": " | ".join(warnings)})
         warn = write_job_runs(rows)
+        if warn:
+            warnings.append(warn)
+            log(f"WARNING: {warn}")
+        warn = refresh_portfolio_status()
         if warn:
             warnings.append(warn)
             log(f"WARNING: {warn}")

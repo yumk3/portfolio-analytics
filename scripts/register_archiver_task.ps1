@@ -77,11 +77,19 @@ Write-Host "  Next run      : $($i.NextRunTime)"
 
 if ($MakeDesktopShortcut) {
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $lnk = Join-Path $desktop "ETF Archiver Status.lnk"
-    $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $shell = New-Object -ComObject WScript.Shell
+    # PORTFOLIO_STATUS.txt covers both jobs. Retire the older archiver-only
+    # shortcut, but only if it is the one this script made.
+    $old = Join-Path $desktop "ETF Archiver Status.lnk"
+    if ((Test-Path $old) -and $shell.CreateShortcut($old).Arguments -eq "`"$Repo\ETF_ARCHIVER_STATUS.txt`"") {
+        Remove-Item $old
+        Write-Host "  Removed       : $old"
+    }
+    $lnk = Join-Path $desktop "Portfolio Status.lnk"
+    $sh = $shell.CreateShortcut($lnk)
     $sh.TargetPath = "$env:WINDIR\notepad.exe"
-    $sh.Arguments = "`"$Repo\ETF_ARCHIVER_STATUS.txt`""
-    $sh.Description = "What the ETF archiver captured on its last run"
+    $sh.Arguments = "`"$Repo\PORTFOLIO_STATUS.txt`""
+    $sh.Description = "Latest ETF archiver and nightly pipeline runs"
     $sh.Save()
     Write-Host "  Shortcut      : $lnk"
 }

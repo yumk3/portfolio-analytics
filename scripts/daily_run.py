@@ -8,7 +8,9 @@ compute_returns reuse it rather than taking their own (see run_backup.py).
 Stop rules: any failing step stops the run, including a partial ingest (exit 1) and a
 rebuild that reports a NEW unexplained residual. A valuation FAIL skips both returns
 steps, so the returns tables stay as the previous good run left them. A database
-locked by another job is retried. Validators are run, never imported.
+locked by another job is retried. Validators are run, never imported. Finally
+PORTFOLIO_STATUS.txt is refreshed (status_report.py); a failure there is reported
+but never changes the result.
 
 Exit codes: 0 ok, 1 a step failed or a validator reported FAIL, 2 could not start,
 3 already running. Usage: python scripts\\daily_run.py [--db PATH] [--dry-run]
@@ -38,6 +40,7 @@ BUSY_TRIES = 3
 BUSY_WAIT = 60                               # seconds between tries on a locked database
 BUSY_RE = re.compile(r"Could not set lock|Conflicting lock|database is in use", re.I)
 CHECKS_RE = re.compile(r"(\d+) checks: (\d+) PASS, (\d+) WARN, (\d+) INFO, (\d+) FAIL")
+CHECK_LINE_RE = re.compile(r"^\s*\[(WARN|FAIL)\s*\]\s+(?:CHECK\s+)?(\S+)\s+(.*?)\s*$", re.M)
 REBUILD_NEW_RE = re.compile(r"NEW - not previously seen, needs a decision \((\d+)\)")
 PRICES_OVER_RE = re.compile(r"over 1%: (\d+)")
 
@@ -55,6 +58,11 @@ STEPS = (
 )
 RETURNS_STEPS = ("compute_returns", "validate_returns")
 TAKES_DB_ARG = ("rebuild", "value")
+
+# Run after the record is written; its outcome never changes the run's result.
+STATUS_SCRIPT = SCRIPTS / "status_report.py"
+STATUS_TIMEOUT = 120                         # seconds
+STATUS_NAME = "PORTFOLIO_STATUS.txt"         # written beside the logs folder: the repo root
 
 JOB_RUNS_DDL = """
 CREATE TABLE IF NOT EXISTS job_runs (
@@ -153,7 +161,8 @@ def assess(step, code, out):
         if not m:
             return "failed", "no check summary in the output (exit %d)" % code, True
         n, p, w, i, f = m.groups()
-        detail = "%s checks: %s PASS, %s WARN, %s INFO, %s FAIL" % (n, p, w, i, f)
+        detail = " | ".join(["%s checks: %s PASS, %s WARN, %s INFO, %s FAIL" % (n, p, w, i, f)]
+                            + ["%s %s %s" % c.groups() for c in CHECK_LINE_RE.finditer(out)])
         if int(f) or code:
             return "FAIL", detail, False
         return "ok", detail, False
@@ -173,14 +182,54 @@ def assess(step, code, out):
     return "ok", "", False
 
 
+def read_parked(path):
+    """Return the rows parked in one pending file, timestamps restored."""
+    rows = []
+    for r in json.loads(path.read_text(encoding="utf-8")):
+        for k in (2, 3):
+            if isinstance(r[k], str):
+                r[k] = datetime.datetime.fromisoformat(r[k])
+        rows.append(tuple(r))
+    return rows
+
+
+def insert_new_rows(con, rows):
+    """Insert the rows not already recorded, keyed on (job_name, run_id, item), atomically.
+
+    A parked file whose rows were written but which was not deleted afterwards
+    therefore adds nothing the next time.
+    """
+    con.execute("BEGIN")
+    try:
+        run_ids = sorted({r[1] for r in rows})
+        seen = set(con.execute("SELECT job_name, run_id, item FROM job_runs WHERE run_id IN (%s)"
+                               % ",".join("?" * len(run_ids)), run_ids).fetchall())
+        new = []
+        for r in rows:
+            if (r[0], r[1], r[4]) not in seen:
+                seen.add((r[0], r[1], r[4]))
+                new.append(r)
+        if new:
+            con.executemany("INSERT INTO job_runs (job_name, run_id, started_at, finished_at, "
+                            "item, status, detail, error) VALUES (?,?,?,?,?,?,?,?)", new)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
 def write_job_runs(db, rows, log_dir, sleep):
-    """Append rows to job_runs; park them in a file if the database stays locked."""
+    """Append rows, and any parked earlier, to job_runs; park them if that fails."""
     import duckdb
     pending = log_dir / "daily_run_pending"
-    backlog = sorted(pending.glob("*.json")) if pending.exists() else []
-    all_rows = list(rows)
-    for b in backlog:
-        all_rows += [tuple(r) for r in json.loads(b.read_text(encoding="utf-8"))]
+    backlog, all_rows = [], list(rows)
+    for b in sorted(pending.glob("*.json")) if pending.exists() else []:
+        try:
+            all_rows += read_parked(b)
+            backlog.append(b)
+        except (OSError, ValueError, IndexError, TypeError):
+            pass                   # left in place; the status file lists it
+    why = "database locked"
     for attempt in range(BUSY_TRIES):
         try:
             con = duckdb.connect(str(db))
@@ -191,16 +240,37 @@ def write_job_runs(db, rows, log_dir, sleep):
             break
         try:
             con.execute(JOB_RUNS_DDL)
-            con.executemany("INSERT INTO job_runs (job_name, run_id, started_at, finished_at, "
-                            "item, status, detail, error) VALUES (?,?,?,?,?,?,?,?)", all_rows)
+            insert_new_rows(con, all_rows)
+        except duckdb.Error as e:
+            why = "%s: %s" % (type(e).__name__, str(e).splitlines()[0][:120])
+            break
         finally:
             con.close()
         for b in backlog:
-            b.unlink()
+            try:
+                b.unlink()
+            except OSError:
+                pass               # harmless: its rows are skipped next time
         return None
     pending.mkdir(parents=True, exist_ok=True)
     (pending / ("%s.json" % rows[0][1])).write_text(json.dumps(rows, default=str), encoding="utf-8")
-    return "job_runs not written (database locked); saved for the next run"
+    return "job_runs not written (%s); saved for the next run" % why
+
+
+def refresh_status(db, log_dir):
+    """Rewrite PORTFOLIO_STATUS.txt in its own process; return a warning or None."""
+    try:
+        r = subprocess.run([sys.executable, str(STATUS_SCRIPT), "--db", str(db),
+                            "--out", str(log_dir.parent / STATUS_NAME),
+                            "--log-dir", str(log_dir), "--by", JOB_NAME],
+                           cwd=REPO, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=STATUS_TIMEOUT)
+    except Exception as e:
+        return "%s not updated (%s: %s)" % (STATUS_NAME, type(e).__name__, e)
+    if r.returncode:
+        return "%s not updated (exit %d): %s" % (STATUS_NAME, r.returncode,
+                                                 (r.stdout + r.stderr).strip()[-300:])
+    return None
 
 
 def run(db, *, steps=None, through=None, runner=None, log_dir=None, sleep=time.sleep):
@@ -294,6 +364,8 @@ def run(db, *, steps=None, through=None, runner=None, log_dir=None, sleep=time.s
         if warn:
             print("WARNING: %s" % warn)
         print("Log: %s" % log_file)
+        warn = refresh_status(db, log_dir)
+        print("WARNING: %s" % warn if warn else "Status: %s" % (log_dir.parent / STATUS_NAME))
         return 0 if status == "ok" else 1
     finally:
         lock.close()
@@ -310,6 +382,7 @@ def main(argv=None):
         print("database: %s" % db)
         for step, script in STEPS:
             print("  %-19s %s" % (step, script_path(script)))
+        print("  %-19s %s" % ("status", STATUS_SCRIPT))
         return 0
     return run(db)
 

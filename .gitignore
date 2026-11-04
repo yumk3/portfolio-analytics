@@ -36,6 +36,8 @@ logs/
 *.log
 *.lock
 ETF_ARCHIVER_STATUS.txt
+PORTFOLIO_STATUS.txt
+PORTFOLIO_STATUS.txt.tmp
 
 # Personal configuration: commit only the .example versions
 archiver/config.ini

@@ -3,14 +3,16 @@
 Stand-in scripts are passed to run() as a Python function, which only the test
 suite can do; the last tests prove a real invocation always runs the real scripts.
 """
+import contextlib
 import datetime as dt
-import hashlib
 import importlib.util
+import json
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import time
 
 import duckdb
 import pytest
@@ -211,6 +213,156 @@ def test_missing_database_does_not_start(dr, tmp_path):
     assert code == 2 and stand.calls == []
 
 
+def flaky_hash(dr, monkeypatch, bad_copies):
+    """Make the first bad_copies backup copies fail verification."""
+    real, seen, pauses = dr.sha256, [], []
+
+    def fake(path):
+        seen.append(path)
+        n = sum(1 for p in seen if p == path)
+        return "changed" if path.parent.name == "backups" and n <= bad_copies else real(path)
+    monkeypatch.setattr(dr, "sha256", fake)
+    monkeypatch.setattr(dr.time, "sleep", pauses.append)
+    return pauses
+
+
+def test_a_backup_that_fails_verification_is_copied_again(dr, db, tmp_path, monkeypatch):
+    pauses = flaky_hash(dr, monkeypatch, bad_copies=1)
+    original = db.read_bytes()
+    stand = Stand()
+    code, _ = go(dr, db, tmp_path, stand)
+    assert code == 0 and stand.ran() == ALL and pauses == [1]
+    backups = list((db.parent / "backups").glob("*.duckdb"))
+    assert len(backups) == 1 and backups[0].read_bytes() == original
+
+
+def test_a_backup_that_never_verifies_stops_before_any_step(dr, db, tmp_path, monkeypatch):
+    flaky_hash(dr, monkeypatch, bad_copies=dr.BUSY_TRIES)
+    stand = Stand()
+    code, _ = go(dr, db, tmp_path, stand)
+    assert code == 2 and stand.calls == []
+    assert list((db.parent / "backups").iterdir()) == []        # no unverified copy left
+
+
+# ------------------------------------------------------------ step timeout
+def test_a_step_over_the_time_limit_is_killed_and_stops_the_run(dr, db, tmp_path, monkeypatch):
+    marker = tmp_path / "still_running.txt"
+    sleeper = tmp_path / "sleeper.py"
+    sleeper.write_text("import pathlib, time\nprint('started', flush=True)\ntime.sleep(4)\n"
+                       "pathlib.Path(%r).write_text('x')\n" % str(marker), encoding="utf-8")
+    monkeypatch.setattr(dr, "STEP_TIMEOUT", 1)
+    monkeypatch.setattr(dr, "script_path", lambda script: sleeper)
+    code = dr.run(db, steps=["ingest", "splits"], log_dir=tmp_path / "logs",
+                  sleep=lambda s: None)
+    rows = job_rows(db)
+    assert code == 1 and rows["ingest"] == ("failed", "exit code 124")
+    assert rows["splits"] == ("skipped", "not run: ingest failed")
+    log = next((tmp_path / "logs").glob("daily_run_*.log")).read_text(encoding="utf-8")
+    assert "TIMED OUT after 1 s" in log
+    time.sleep(5)
+    assert not marker.exists()                                  # the process was killed
+
+
+# ------------------------------------------------------------ parked run records
+@contextlib.contextmanager
+def held(db):
+    """Hold a write connection to db from another process."""
+    p = subprocess.Popen([sys.executable, "-c", "import duckdb, sys; c = duckdb.connect(sys.argv[1]);"
+                          " print('held', flush=True); sys.stdin.read()", str(db)],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        yield
+    finally:
+        p.stdin.close()
+        p.wait(timeout=60)
+
+
+def record(run_id, items=("ingest", "_run")):
+    t = dt.datetime(2026, 1, 6, 23, 0, 1, 123456)
+    return [("daily_run", run_id, t, t + dt.timedelta(minutes=1), i, "ok", "d", "")
+            for i in items]
+
+
+def all_job_rows(db):
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        return con.execute("SELECT * FROM job_runs ORDER BY run_id, item").fetchall()
+    finally:
+        con.close()
+
+
+def test_rows_are_parked_while_locked_and_written_once_later(dr, db, tmp_path):
+    logs = tmp_path / "logs"
+    pending = logs / "daily_run_pending"
+    with held(db):
+        warn = dr.write_job_runs(db, record("r1"), logs, sleep=lambda s: None)
+    assert warn == "job_runs not written (database locked); saved for the next run"
+    assert [p.name for p in pending.iterdir()] == ["r1.json"]
+
+    assert dr.write_job_runs(db, record("r2"), logs, sleep=lambda s: None) is None
+    assert list(pending.iterdir()) == []
+    assert dr.write_job_runs(db, record("r3"), logs, sleep=lambda s: None) is None
+    rows = all_job_rows(db)
+    assert [(r[1], r[4]) for r in rows] == [(rid, i) for rid in ("r1", "r2", "r3")
+                                            for i in ("_run", "ingest")]
+    assert rows[0][2] == dt.datetime(2026, 1, 6, 23, 0, 1, 123456)   # still a timestamp
+
+
+def test_a_parked_file_left_after_a_write_is_not_inserted_twice(dr, db, tmp_path):
+    logs = tmp_path / "logs"
+    assert dr.write_job_runs(db, record("r1"), logs, sleep=lambda s: None) is None
+    pending = logs / "daily_run_pending"                # as if the delete never happened
+    pending.mkdir(parents=True)
+    (pending / "r1.json").write_text(json.dumps(record("r1"), default=str), encoding="utf-8")
+    assert dr.write_job_runs(db, record("r2"), logs, sleep=lambda s: None) is None
+    assert [(r[1], r[4]) for r in all_job_rows(db)] == [
+        ("r1", "_run"), ("r1", "ingest"), ("r2", "_run"), ("r2", "ingest")]
+    assert list(pending.iterdir()) == []
+
+
+def test_a_database_error_parks_the_rows_instead_of_losing_them(dr, db, tmp_path):
+    con = duckdb.connect(str(db))
+    con.execute("CREATE TABLE job_runs (job_name VARCHAR)")   # wrong shape: insert fails
+    con.close()
+    logs = tmp_path / "logs"
+    warn = dr.write_job_runs(db, record("r1"), logs, sleep=lambda s: None)
+    assert warn.startswith("job_runs not written (") and warn.endswith("saved for the next run")
+    assert (logs / "daily_run_pending" / "r1.json").exists()
+
+
+# ------------------------------------------------------------ validator detail and status
+def test_validator_warn_and_fail_lines_are_kept_in_the_detail(dr, db, tmp_path):
+    out = ("  [PASS] CHECK 1   Holdings\n  [WARN] CHECK 5   Crypto sleeve\n"
+           "  [FAIL] CHECK 9c  Prices\n" + CHECKS_FAIL)
+    ret = "[WARN] 3b  Statement checkpoint\n7 checks: 5 PASS, 1 WARN, 1 INFO, 0 FAIL"
+    stand = Stand(validate_valuation=(1, out), validate_returns=(0, ret))
+    go(dr, db, tmp_path, stand)
+    rows = job_rows(db)
+    assert rows["validate_valuation"][1] == CHECKS_FAIL + " | WARN 5 Crypto sleeve | FAIL 9c Prices"
+    stand = Stand(validate_returns=(0, ret))
+    go(dr, db, tmp_path, stand)
+    details = [r[6] for r in all_job_rows(db) if r[4] == "validate_returns"]
+    assert "7 checks: 5 PASS, 1 WARN, 1 INFO, 0 FAIL | WARN 3b Statement checkpoint" in details
+
+
+def test_the_status_file_is_written_at_the_end(dr, db, tmp_path):
+    code, _ = go(dr, db, tmp_path, Stand())
+    text = (tmp_path / "PORTFOLIO_STATUS.txt").read_text(encoding="utf-8")
+    assert code == 0 and "(by daily_run)" in text and "NIGHTLY PIPELINE" in text
+
+
+@pytest.mark.parametrize("body", ["raise SystemExit(5)\n", "import time\ntime.sleep(30)\n"])
+def test_a_status_failure_does_not_change_the_result(dr, db, tmp_path, monkeypatch, capsys, body):
+    broken = tmp_path / "broken_status.py"
+    broken.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(dr, "STATUS_SCRIPT", broken)
+    monkeypatch.setattr(dr, "STATUS_TIMEOUT", 2)
+    code, _ = go(dr, db, tmp_path, Stand())
+    assert code == 0 and job_rows(db)["_run"][0] == "ok"
+    assert "WARNING: PORTFOLIO_STATUS.txt not updated" in capsys.readouterr().out
+
+
 # ------------------------------------------------------------ run_backup helper
 @pytest.fixture
 def rb():
@@ -299,8 +451,8 @@ def test_end_to_end_on_the_sample_with_real_scripts(dr, sample_db, tmp_path, mon
     rows = job_rows(sample_db)
     assert code == 0, rows
     assert {s: rows[s][0] for s in steps} == {s: "ok" for s in steps}
-    assert rows["validate_valuation"][1].endswith("0 FAIL")
-    assert rows["validate_returns"][1].endswith("0 FAIL")
+    assert rows["validate_valuation"][1].split(" | ")[0].endswith("0 FAIL")
+    assert rows["validate_returns"][1].split(" | ")[0].endswith("0 FAIL")
     backups = list((sample_db.parent / "backups").glob("*.duckdb"))
     assert len(backups) == 1 and backups[0].name.startswith("portfolio_daily_")
     log = (tmp_path / "logs").glob("daily_run_*.log")
@@ -324,7 +476,8 @@ def test_real_invocation_always_runs_the_real_scripts(tmp_path):
                                                  ("ingest_snaptrade.py", "load_splits.py",
                                                   "rebuild_holdings.py", "load_prices.py",
                                                   "value_portfolio.py", "validate_valuation.py",
-                                                  "compute_returns.py", "validate_returns.py")]
+                                                  "compute_returns.py", "validate_returns.py",
+                                                  "status_report.py")]
     assert all(pathlib.Path(p).is_file() for p in listed)
 
 
@@ -342,3 +495,4 @@ def test_main_calls_run_without_test_hooks(dr, monkeypatch, tmp_path):
     assert dr.main(["--db", str(tmp_path / "x.duckdb")]) == 0
     assert seen["kw"] == {}
     assert dr.run_script.__module__ == dr.__name__ and dr.SCRIPTS == SCRIPTS
+    assert dr.STATUS_SCRIPT == SCRIPTS / "status_report.py"
