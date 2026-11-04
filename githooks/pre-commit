@@ -1,0 +1,19 @@
+#!/bin/sh
+# Refuses the commit unless tools/scan_diff.py reports the staged changes CLEAN.
+# Any other outcome (findings, cannot scan, no Python, no scanner) blocks it.
+# Install once per clone; see "Pre-commit scan" in README.md.
+
+py=$(git config --get hooks.python)
+if [ -z "$py" ]; then
+    echo "pre-commit: hooks.python is not set, so the scan cannot run. Commit refused." >&2
+    echo "  git config hooks.python <path-to-venv>/Scripts/python.exe" >&2
+    exit 1
+fi
+
+root=$(git rev-parse --show-toplevel)
+"$py" "$root/tools/scan_diff.py" --cached
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "pre-commit: commit refused (scan exit code $status)." >&2
+    exit 1
+fi

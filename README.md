@@ -136,6 +136,26 @@ by Task Scheduler. A missing `*.local.csv` means "none listed". The `INPUTS_DIR`
 environment variable replaces the `inputs/` folder; the test suite points it at an
 empty folder, so tests never read your files.
 
+### Pre-commit scan
+
+`githooks/pre-commit` runs `tools/scan_diff.py` on the staged changes and refuses the
+commit unless the result is CLEAN. The scanner holds no personal data: it reads a
+denylist from `_private/scan_denylist.json` (gitignored; lists `identity`, `brokers`,
+`figures`, `tickers`), optional exceptions to ticker matching from
+`_private/scan_allowlist.txt`, and the values in `.env`, the database, raw SnapTrade
+responses and `archiver/config.ini`. Tickers match as whole words, case-sensitive. If
+any source cannot be read, including a database locked by another run, the commit is
+refused (exit code 2). Git does not copy hooks when cloning, so enable it once per
+clone:
+
+```powershell
+git config core.hooksPath githooks
+git config hooks.python <path-to-venv>\Scripts\python.exe
+```
+
+`git config --get core.hooksPath` prints `githooks` when it is enabled. To check commits
+before pushing: `<path-to-venv>\Scripts\python.exe tools\scan_diff.py origin/main..HEAD`.
+
 ### `.env`
 
 | Variable | Purpose |
@@ -241,6 +261,7 @@ Saved files are never overwritten, moved or deleted.
 | `archiver/` | ETF holdings archiver, its config template and a one-off archive migration tool |
 | `scripts/` | Ingestion, rebuild, pricing, valuation, validation, returns, sample data and task registration |
 | `tests/` | pytest suite: returns maths and an end-to-end sample-data smoke test |
+| `tools/`, `githooks/` | Publish scan for staged changes and the pre-commit hook that enforces it |
 | `inputs/` | Templates for private inputs (real files are gitignored) |
 | `sample_data/` | Fabricated sample database and price file for the quickstart |
 | `src/` | Reserved; currently empty |
