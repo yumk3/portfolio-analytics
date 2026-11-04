@@ -439,16 +439,23 @@ def check9b_exceptions(con, snap_date):
 
 
 def check9c_value(con, snap_date):
-    """Check 9c: value differences vs SnapTrade, split into quantity and price effects."""
+    """Check 9c: value differences vs SnapTrade, split into quantity and price effects.
+
+    A price effect over the limit is a wrong price (FAIL), except when our
+    price is carried forward and the snapshot was taken after that close:
+    then the gap is the market moving since our last close (WARN, never PASS).
+    """
     d = ["value difference split into a quantity effect and a price effect:",
          "  quantity effect = (our_qty - their_qty) x our_price",
          "  price effect    = their_qty x (our_price - their_price)",
-         "  FAIL only if the PRICE effect exceeds %.0f%% - that means a wrong price."
+         "  FAIL if the PRICE effect exceeds %.0f%% - a wrong price - unless our price is"
          % PRICE_EFFECT_PCT,
+         "  carried forward and the snapshot is newer than our close (WARN, timing).",
          "",
          "  %-6s %12s %12s %12s %12s %9s  %s" %
          ("SYMBOL", "THEIR VAL", "OUR VAL", "QTY EFFECT", "PRICE EFF", "PRICE %", "OUR PRICE DATE")]
-    bad, total_qty_eff, total_px_eff = 0, decimal.Decimal(0), decimal.Decimal(0)
+    bad, timing = 0, 0
+    total_qty_eff, total_px_eff = decimal.Decimal(0), decimal.Decimal(0)
     for acct, aid, sym, sq, smv, vq, vp, vmv in _snap_rows(con, snap_date):
         if vq is None or vp is None:
             continue
@@ -458,23 +465,37 @@ def check9c_value(con, snap_date):
         total_qty_eff += qty_eff
         total_px_eff += px_eff
         px_pct = (px_eff / D(smv) * 100) if D(smv) else decimal.Decimal(0)
+        pdate, pstatus = con.execute("""SELECT price_date, price_status
+            FROM positions_value_daily WHERE date=? AND symbol=? AND account_id=?""",
+            [snap_date, sym, aid]).fetchone() or (None, None)
+        loaded = con.execute("""SELECT max(loaded_at) FROM positions
+            WHERE as_of_date=? AND symbol=? AND account_id=?""",
+            [snap_date, sym, aid]).fetchone()[0]
+        note = ""
         if abs(px_pct) > decimal.Decimal(str(PRICE_EFFECT_PCT)):
-            bad += 1
-        pdate = con.execute("""SELECT price_date FROM positions_value_daily
-            WHERE date=? AND symbol=? AND account_id=?""", [snap_date, sym, aid]).fetchone()
-        d.append("  %-6s %12.4f %12.4f %12s %12s %8.3f%%  %s"
+            if (pstatus == "forward_filled" and pdate is not None
+                    and loaded is not None and loaded.date() > pdate):
+                timing += 1
+                note = "  TIMING: our close %s carried forward; snapshot %s" % (
+                    pdate, loaded.strftime("%Y-%m-%d %H:%M"))
+            else:
+                bad += 1
+                note = "  OVER %.0f%%: %s price, snapshot %s" % (
+                    PRICE_EFFECT_PCT, pstatus or "no",
+                    loaded.strftime("%Y-%m-%d %H:%M") if loaded else "time unknown")
+        d.append("  %-6s %12.4f %12.4f %12s %12s %8.3f%%  %s%s"
                  % (sym, smv, vmv,
                     qty_eff.quantize(decimal.Decimal("0.0001")),
                     px_eff.quantize(decimal.Decimal("0.0001")), px_pct,
-                    pdate[0] if pdate else "-"))
+                    pdate or "-", note))
     d.append("")
     d.append("  totals: quantity effect $%s, price effect $%s"
              % (total_qty_eff.quantize(decimal.Decimal("0.0001")),
                 total_px_eff.quantize(decimal.Decimal("0.0001"))))
     d.append("  price effects under %.0f%% are TIMING (our close vs their intraday "
              "snapshot), not errors." % PRICE_EFFECT_PCT)
-    record("9c", "SnapTrade value (quantity effect vs price effect)",
-           "FAIL" if bad else "INFO", "\n".join(d))
+    status = "FAIL" if bad else "WARN" if timing else "INFO"
+    record("9c", "SnapTrade value (quantity effect vs price effect)", status, "\n".join(d))
     return total_qty_eff, total_px_eff
 
 
