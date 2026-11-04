@@ -1,11 +1,14 @@
 """Load per-user lists (accepted exceptions, reviewed price jumps, opening balances) from
 gitignored CSVs under inputs/ (templates: *.example.csv). Paths resolve from this file, so
 scheduled runs work from any directory; a missing file yields an empty result.
+The INPUTS_DIR environment variable replaces inputs/ (tests point it at an empty folder).
 """
 import csv
+import os
 import pathlib
 
-INPUTS = pathlib.Path(__file__).resolve().parents[1] / "inputs"
+INPUTS = pathlib.Path(os.getenv("INPUTS_DIR")
+                      or pathlib.Path(__file__).resolve().parents[1] / "inputs")
 ACCEPTED_EXCEPTIONS_CSV = INPUTS / "accepted_exceptions.local.csv"
 REVIEWED_JUMPS_CSV = INPUTS / "reviewed_jumps.local.csv"
 OPENING_BALANCES_CSV = INPUTS / "opening_balances.csv"

@@ -52,7 +52,7 @@ def sql_in(names):
     """Return names formatted for SQL IN (...); empty becomes NULL, which matches nothing."""
     return ",".join("'%s'" % s for s in names) or "NULL"
 
-CHECKPOINTS = PROJECT_ROOT / "inputs" / "statement_checkpoints.csv"
+CHECKPOINTS = local_inputs.INPUTS / "statement_checkpoints.csv"
 
 results = []
 
@@ -247,8 +247,8 @@ def check5_staleness(con):
     crypto = "('BTC','ETH','XRP','SOL','DOGE','LTC','ADA','MATIC')"
     for label, lst in (("crypto", crypto), ("equity", crypto)):
         op = "IN" if label == "crypto" else "NOT IN"
-        r = con.execute("""SELECT count(*), sum(CASE WHEN price_status='forward_filled'
-                THEN 1 ELSE 0 END), max(days_stale) FROM positions_value_daily
+        r = con.execute("""SELECT count(*), coalesce(sum(CASE WHEN price_status='forward_filled'
+                THEN 1 ELSE 0 END), 0), max(days_stale) FROM positions_value_daily
                 WHERE symbol %s %s""" % (op, lst)).fetchone()
         d.append("  %-7s %5d rows, %d forward-filled, max stale %s"
                  % (label, r[0], r[1], r[2]))
@@ -546,7 +546,8 @@ def check10_statements(con):
     filled = [r for r in rows if (r.get("statement_securities_value") or "").strip()]
 
     exc_list = sql_in(ACCEPTED_EXCEPTIONS)
-    d = ["file: %s" % CHECKPOINTS.relative_to(PROJECT_ROOT),
+    d = ["file: %s" % (CHECKPOINTS.relative_to(PROJECT_ROOT)
+                       if CHECKPOINTS.is_relative_to(PROJECT_ROOT) else CHECKPOINTS),
          "rows: %d total, %d filled, %d blank (SKIPPED, not failed)"
          % (len(rows), len(filled), len(rows) - len(filled)),
          "compared EXCLUDING %s - a statement has no line for them (same basis as 9b)"

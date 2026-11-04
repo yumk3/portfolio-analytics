@@ -21,9 +21,9 @@ if not DB_PATH.is_absolute():
     DB_PATH = REPO / DB_PATH
 # Overridable so the checks can be exercised with sample checkpoint files.
 BROKER_CSV = pathlib.Path(os.getenv("RETURNS_BROKER_CSV")
-                          or REPO / "inputs" / "broker_return_checkpoints.csv")
+                          or local_inputs.INPUTS / "broker_return_checkpoints.csv")
 STATEMENT_CSV = pathlib.Path(os.getenv("RETURNS_STATEMENT_CSV")
-                             or REPO / "inputs" / "statement_gain_checkpoints.csv")
+                             or local_inputs.INPUTS / "statement_gain_checkpoints.csv")
 
 RATE_TOL = 1e-9            # 1a, 1c: identical formulas must agree to rounding
 DOLLAR_TOL = 0.01          # 1b: sums must tie to the cent

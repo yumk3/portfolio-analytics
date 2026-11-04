@@ -132,7 +132,9 @@ made-up values (`ACCT-0001`, ticker `XYZ`). Copy the template, then fill it in:
 | `inputs/broker_return_checkpoints.csv` | `inputs/broker_return_checkpoints.example.csv` | Broker-reported return figures |
 
 Scripts locate these relative to their own files, so they behave the same when started
-by Task Scheduler. A missing `*.local.csv` means "none listed".
+by Task Scheduler. A missing `*.local.csv` means "none listed". The `INPUTS_DIR`
+environment variable replaces the `inputs/` folder; the test suite points it at an
+empty folder, so tests never read your files.
 
 ### `.env`
 
