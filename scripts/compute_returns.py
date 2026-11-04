@@ -5,7 +5,6 @@ Usage: python scripts\compute_returns.py
 import datetime
 import os
 import pathlib
-import shutil
 import sys
 import uuid
 
@@ -15,6 +14,7 @@ import pandas as pd
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import returns_lib as rl                                     # noqa: E402
 import local_inputs                                          # noqa: E402
+from run_backup import backup_before_write                   # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DB_PATH = pathlib.Path(os.getenv("DB_PATH") or REPO / "data" / "portfolio.duckdb")
@@ -467,9 +467,9 @@ def main():
     for df in (df_daily, df_summary, df_pos, df_excl):
         df["computed_at"] = stamp
 
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    backup = BACKUP_DIR / f"portfolio_before_returns_{started:%Y%m%d_%H%M%S}.duckdb"
-    shutil.copy2(DB_PATH, backup)
+    backup, reused = backup_before_write(
+        DB_PATH, BACKUP_DIR, f"portfolio_before_returns_{started:%Y%m%d_%H%M%S}.duckdb")
+    backup_label = f"{backup.name}, taken by daily_run" if reused else backup.name
     try:
         con = duckdb.connect(str(DB_PATH))
     except duckdb.IOException as e:
@@ -500,7 +500,7 @@ def main():
                               ("position_returns", df_pos), ("returns_exclusions", df_excl))]
         rows.append((JOB_NAME, run_id, started, finished, "_run",
                      "ok" if not warnings else "warnings",
-                     f"as of {asof}; excluded {', '.join(excluded)}; backup {backup.name}",
+                     f"as of {asof}; excluded {', '.join(excluded)}; backup {backup_label}",
                      " | ".join(warnings)))
         con.executemany("INSERT INTO job_runs (job_name, run_id, started_at, finished_at, "
                         "item, status, detail, error) VALUES (?,?,?,?,?,?,?,?)", rows)
@@ -514,7 +514,7 @@ def main():
         con.close()
 
     pct = lambda x: "      -" if x is None or pd.isna(x) else f"{x * 100:7.2f}%"
-    print(f"Returns as of {asof} (securities sleeve only; backup: {backup.name})")
+    print(f"Returns as of {asof} (securities sleeve only; backup: {backup_label})")
     print("Left out of portfolio returns: %s" % ("none" if not exclusions else ""))
     for e in exclusions:
         last = ("last priced %s, value %.2f" % (e["last_priced_date"], e["last_priced_value"])

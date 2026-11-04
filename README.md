@@ -188,6 +188,7 @@ Run in this order on a fresh database; all steps are safe to re-run.
 | `value_portfolio.py` | Builds `positions_value_daily` and `portfolio_value_daily`. |
 | `validate_valuation.py` | 15 independent checks (0-11); exits non-zero on any FAIL. |
 | `compute_returns.py` / `validate_returns.py` | Returns tables and their validation (in progress, see Status). |
+| `daily_run.py` | Runs the steps above in order (rebuild before prices), each as its own process, after one verified database backup (ingest and compute_returns reuse it; run alone, they take their own as before); records every step in `job_runs`. Stops on a failed step, a partial ingest or a new rebuild residual; a valuation FAIL skips returns and leaves the previous returns tables in place. `--dry-run` lists the scripts it would run. |
 
 **Any new split requires a full price re-download.** yfinance restates historical
 closes and `rebuild_holdings.py` restates units whenever a split occurs; restating only

@@ -6,13 +6,15 @@ import os
 import sys
 import json
 import time
-import shutil
 import logging
 import pathlib
 import datetime
 from collections import defaultdict
 
 from dotenv import load_dotenv
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from run_backup import backup_before_write                    # noqa: E402
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -584,11 +586,14 @@ def main():
         log.info("dry run complete: no database writes")
         return 1 if failed else 0
 
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    backup_path = BACKUP_DIR / ("portfolio_%s.duckdb" % RUN_STAMP)
-    shutil.copy2(db_path, backup_path)
-    log.info("backup written: %s", backup_path.name)
-    print("Backup: %s" % backup_path.relative_to(PROJECT_ROOT))
+    backup_path, reused = backup_before_write(db_path, BACKUP_DIR,
+                                              "portfolio_%s.duckdb" % RUN_STAMP)
+    if reused:
+        log.info("backup taken by daily_run: %s", backup_path.name)
+        print("Backup: taken by daily_run (%s)" % backup_path.name)
+    else:
+        log.info("backup written: %s", backup_path.name)
+        print("Backup: %s" % backup_path.relative_to(PROJECT_ROOT))
 
     # One transaction per account: a failure rolls back that account only.
     con = duckdb.connect(str(db_path))
