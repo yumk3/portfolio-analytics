@@ -1,6 +1,8 @@
 """Load split-adjusted daily closes from yfinance into `prices` for each held
 symbol's full holding window, then report coverage and check against positions.
-Idempotent upsert. Usage: python scripts/load_prices.py
+Only finished bars are stored (see is_finished), so a run at any hour never
+records a price still moving as a close. Idempotent upsert.
+Usage: python scripts/load_prices.py
 """
 import os
 import sys
@@ -8,6 +10,7 @@ import time
 import pathlib
 import warnings
 import datetime
+import zoneinfo
 
 warnings.filterwarnings("ignore")
 
@@ -32,9 +35,33 @@ EPS = 1e-9
 CRYPTO = {"BTC", "ETH", "XRP", "SOL", "DOGE", "LTC", "ADA", "MATIC"}
 
 
+UTC = datetime.timezone.utc
+EXCHANGE_TZ = zoneinfo.ZoneInfo("America/New_York")      # US listings
+# A stock's bar is final only after this exchange-clock time on its date: later
+# than the 16:00 close, the 13:00 early closes and the end of after-hours
+# trading, so no session still under way is ever stored.
+STOCK_FINAL_AFTER = datetime.time(20, 0)
+
+
 def source_ticker_for(symbol):
     """Map a held symbol to the ticker yfinance knows it by."""
     return "%s-USD" % symbol if symbol in CRYPTO else symbol
+
+
+def utc_now():
+    return datetime.datetime.now(UTC)
+
+
+def first_unfinished(symbol, now):
+    """The earliest bar date that can still change at now (an aware datetime)."""
+    if symbol in CRYPTO:
+        return now.astimezone(UTC).date()     # yfinance crypto bars are UTC days
+    local = now.astimezone(EXCHANGE_TZ)
+    return local.date() + datetime.timedelta(days=int(local.time() >= STOCK_FINAL_AFTER))
+
+
+def is_finished(symbol, price_date, now):
+    return price_date < first_unfinished(symbol, now)
 
 
 def assert_unambiguous(con):
@@ -85,7 +112,8 @@ def main():
             return 3
 
         windows = holding_windows(con)
-        today = con.execute("SELECT current_date").fetchone()[0]
+        now = utc_now()
+        today = now.astimezone().date()
 
         print("=" * 78)
         print("LOAD PRICES  (split-adjusted Close, auto_adjust=False)")
@@ -93,7 +121,7 @@ def main():
 
         before = con.execute("SELECT count(*) FROM prices").fetchone()[0]
         written, skipped_no_window, failed, mapping = 0, [], [], {}
-        coverage = []
+        coverage, in_progress, removed = [], 0, 0
 
         for symbol, first_held, last_held in windows:
             if first_held is None:
@@ -102,6 +130,14 @@ def main():
 
             ticker = source_ticker_for(symbol)
             mapping[symbol] = ticker
+
+            # A stored row for a day not yet finished can only be an
+            # in-progress bar from an earlier run; drop it whether or not
+            # today's download succeeds, so valuation carries the last
+            # finished close forward instead.
+            cutoff = first_unfinished(symbol, now)
+            removed += con.execute("DELETE FROM prices WHERE symbol = ? AND price_date >= ?",
+                                   [symbol, cutoff]).fetchone()[0]
 
             # Always re-pull the full window, never incrementally: a split
             # restates every historical Close, and rebuild_holdings restates
@@ -139,6 +175,9 @@ def main():
                 # NULL or a forward-filled value.
                 if close is None or close != close:      # NaN
                     continue
+                if ts.date() >= cutoff:                  # still in progress
+                    in_progress += 1
+                    continue
                 con.execute(
                     "INSERT INTO prices (symbol, price_date, close_price,"
                     " currency, source, source_ticker) VALUES (?,?,?,?,?,?)"
@@ -158,6 +197,10 @@ def main():
         print("  symbols processed   : %d" % len(windows))
         print("  price rows written  : %d" % written)
         print("  prices rows         : %d -> %d" % (before, after))
+        print("  in-progress bars skipped: %d   unfinished rows removed: %d"
+              % (in_progress, removed))
+        print("     (finished: crypto once its UTC day ends; stocks after %s New York time)"
+              % STOCK_FINAL_AFTER.strftime("%H:%M"))
         if skipped_no_window:
             print("  skipped (never held): %s" % ", ".join(skipped_no_window))
         if failed:

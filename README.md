@@ -184,7 +184,7 @@ Run in this order on a fresh database; all steps are safe to re-run.
 | `load_splits.py` | Loads split history from yfinance for every traded symbol. |
 | `seed_opening_balances.py` | Upserts opening balances from `inputs/opening_balances.csv`. |
 | `rebuild_holdings.py` | Rebuilds `holdings_daily`; reconciles against the latest positions. |
-| `load_prices.py` | Loads daily closes for every held symbol; re-pulls full history each run. |
+| `load_prices.py` | Loads daily closes for every held symbol; re-pulls full history each run. Stores finished bars only: crypto once its UTC day has ended, stocks after 20:00 New York time (later than any close, including early closes). A stored row for a day not yet finished is removed, so valuation carries the last finished close forward and marks it `forward_filled`, never `actual`. |
 | `value_portfolio.py` | Builds `positions_value_daily` and `portfolio_value_daily`. |
 | `validate_valuation.py` | 15 independent checks (0-11); exits non-zero on any FAIL. |
 | `compute_returns.py` / `validate_returns.py` | Returns tables and their validation (in progress, see Status). |
